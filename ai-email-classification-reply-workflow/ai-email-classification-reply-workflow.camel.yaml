@@ -1,0 +1,187 @@
+# Flow only: logic lives in scripts/, and Camel SQL executes the statements in sql/.
+- route:
+    id: email-files
+    autoStartup: "{{email.files.enabled}}"
+    from:
+      uri: file:{{email.inbox.dir}}
+      parameters:
+        include: (?i).*\.(eml|json)
+        readLock: changed
+        move: .done/${file:name}
+        moveFailed: .failed/${file:name}
+      steps:
+        - to:
+            uri: direct:process-email
+
+- route:
+    id: email-imap
+    autoStartup: "{{email.imap.enabled}}"
+    from:
+      uri: imaps://{{email.imap.host}}:{{email.imap.port}}
+      parameters:
+        username: "{{email.imap.username}}"
+        password: "{{email.imap.password}}"
+        folderName: "{{email.imap.folder}}"
+        delay: "{{email.imap.delay.ms}}"
+        unseen: true
+        peek: true
+        delete: false
+        mapMailMessage: false
+        fetchSize: 10
+      steps:
+        - to:
+            uri: direct:process-email
+
+- route:
+    id: process-email
+    from:
+      uri: direct:process-email
+      steps:
+        - setBody:
+            groovy: resource:file:scripts/normalize-email.groovy
+        - setProperty:
+            name: email
+            simple: ${body}
+        - to:
+            uri: direct:initialize-database
+        - multicast:
+            parallelProcessing: true
+            synchronous: true
+            aggregationStrategy: "#class:org.apache.camel.processor.aggregate.GroupedBodyAggregationStrategy"
+            steps:
+              - to:
+                  uri: direct:jev-analysis
+              - to:
+                  uri: direct:draft-reply
+        - setBody:
+            groovy: resource:file:scripts/combine-results.groovy
+        - setProperty:
+            name: processedResult
+            simple: ${body}
+        - setBody:
+            groovy: resource:file:scripts/prepare-sql-parameters.groovy
+        - to:
+            uri: sql:file:sql/insert-email.sql
+            parameters:
+              dataSource: "#emailsDb"
+              noop: true
+        - setBody:
+            simple: ${exchangeProperty.processedResult}
+        - removeProperty:
+            name: processedResult
+        - log:
+            message: "Saved email ${body[id]} (status=${body[status]}) to {{db.file}}"
+
+- route:
+    id: initialize-database
+    from:
+      uri: direct:initialize-database
+      steps:
+        - setBody:
+            groovy: resource:file:scripts/prepare-database.groovy
+        - doTry:
+            steps:
+              - to:
+                  uri: sql:file:sql/schema.sql
+                  parameters:
+                    dataSource: "#emailsDb"
+                    noop: true
+              - to:
+                  uri: sql:file:sql/table-columns.sql
+                  parameters:
+                    dataSource: "#emailsDb"
+                    outputHeader: databaseColumns
+              - setBody:
+                  groovy: resource:file:scripts/plan-database-migrations.groovy
+              - split:
+                  simple: ${body}
+                  steps:
+                    - setBody:
+                        groovy: resource:file:scripts/read-migration.groovy
+                    - to:
+                        uri: sql:database-migration
+                        parameters:
+                          dataSource: "#emailsDb"
+                          useMessageBodyForSql: true
+                          noop: true
+            doFinally:
+              steps:
+                - setBody:
+                    groovy: resource:file:scripts/finish-database-init.groovy
+        - removeHeader:
+            name: databaseColumns
+
+- route:
+    id: jev-analysis
+    from:
+      uri: direct:jev-analysis
+      steps:
+        - removeHeaders:
+            pattern: "*"
+        - setProperty:
+            name: provider
+            constant: jev
+        - doTry:
+            steps:
+              - setBody:
+                  groovy: resource:file:scripts/jev-request.groovy
+              - to:
+                  uri: "{{typesafe.url}}"
+                  parameters:
+                    httpMethod: POST
+                    connectTimeout: "{{http.timeout.ms}}"
+                    responseTimeout: "{{http.timeout.ms}}"
+                    throwExceptionOnFailure: true
+                    followRedirects: false
+              - setBody:
+                  groovy: resource:file:scripts/jev-response.groovy
+            doCatch:
+              - exception:
+                  - java.lang.Exception
+                steps:
+                  - setBody:
+                      groovy: resource:file:scripts/provider-failure.groovy
+        - removeHeaders:
+            pattern: "*"
+
+- route:
+    id: draft-reply
+    from:
+      uri: direct:draft-reply
+      steps:
+        - removeHeaders:
+            pattern: "*"
+        - setProperty:
+            name: provider
+            constant: openai
+        - doTry:
+            steps:
+              - setBody:
+                  groovy: resource:file:scripts/draft-request.groovy
+              - to:
+                  uri: "{{openai.base.url}}"
+                  parameters:
+                    httpMethod: POST
+                    connectTimeout: "{{http.timeout.ms}}"
+                    responseTimeout: "{{http.timeout.ms}}"
+                    throwExceptionOnFailure: true
+                    followRedirects: false
+              - setBody:
+                  groovy: resource:file:scripts/draft-response.groovy
+            doCatch:
+              - exception:
+                  - java.lang.Exception
+                steps:
+                  - setBody:
+                      groovy: resource:file:scripts/provider-failure.groovy
+        - removeHeaders:
+            pattern: "*"
+
+- beans:
+    - name: emailsDb
+      type: org.sqlite.SQLiteDataSource
+      properties:
+        url: jdbc:sqlite:{{db.file}}
+        busyTimeout: "{{db.busy.timeout.ms}}"
+    - name: databaseInitLock
+      type: java.util.concurrent.locks.ReentrantLock

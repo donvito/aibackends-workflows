@@ -1,0 +1,8 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+data/
+.camel-jbang/
+__pycache__/
+*.pyc

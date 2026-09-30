@@ -1,0 +1,7 @@
+- route:
+    id: integration-tests
+    from:
+      uri: timer:integration-tests?repeatCount=1&delay=1000
+      steps:
+        - setBody:
+            groovy: resource:file:test/integration-tests.groovy

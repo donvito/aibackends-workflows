@@ -1,0 +1,7 @@
+{
+  "messageId": "<support-001@example.com>",
+  "from": "Alex <alex@example.com>",
+  "to": "Support <support@example.com>",
+  "subject": "Integration keeps failing",
+  "body": "Hi, I have been trying to connect my Stripe account for three days and the integration keeps failing. I am losing sales and getting frustrated. Could you help me fix this ASAP? Thanks, Alex."
+}
